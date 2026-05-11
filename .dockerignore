@@ -1,0 +1,13 @@
+.git
+.github
+.claude
+.vscode
+.idea
+node_modules
+web/node_modules
+web/.svelte-kit
+web/build
+**/.DS_Store
+.env
+.env.*
+*.md
