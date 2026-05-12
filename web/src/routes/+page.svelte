@@ -90,10 +90,10 @@
         preferCanvas: true,
         zoomControl: true
       });
-      L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png', {
-        subdomains: 'abcd',
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        subdomains: 'abc',
         maxZoom: 19,
-        attribution: '© OpenStreetMap contributors © CARTO'
+        attribution: '© OpenStreetMap contributors'
       }).addTo(map);
       requestAnimationFrame(() => map?.invalidateSize());
       mapStatus = 'loaded';
