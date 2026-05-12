@@ -131,6 +131,46 @@ var (
 	pollTrigger   = make(chan struct{}, 1)
 )
 
+// Mutable poll interval — protected by RWMutex, ticker reset signalled via intervalChanged.
+var (
+	intervalMu       sync.RWMutex
+	pollIntervalSecs = 30
+	intervalChanged  = make(chan struct{}, 1)
+)
+
+var allowedIntervals = []int{5, 15, 30, 60}
+
+func isIntervalAllowed(s int) bool {
+	for _, v := range allowedIntervals {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
+func getInterval() time.Duration {
+	intervalMu.RLock()
+	defer intervalMu.RUnlock()
+	return time.Duration(pollIntervalSecs) * time.Second
+}
+
+func getIntervalSecs() int {
+	intervalMu.RLock()
+	defer intervalMu.RUnlock()
+	return pollIntervalSecs
+}
+
+func setIntervalSecs(s int) {
+	intervalMu.Lock()
+	pollIntervalSecs = s
+	intervalMu.Unlock()
+	select {
+	case intervalChanged <- struct{}{}:
+	default:
+	}
+}
+
 func getAgency() string {
 	agencyMu.RLock()
 	defer agencyMu.RUnlock()
@@ -204,7 +244,7 @@ func pollOnce(ctx context.Context, client *http.Client, s *store, apiKey string)
 func poll(ctx context.Context, s *store, apiKey string) {
 	client := &http.Client{Timeout: 10 * time.Second}
 	pollOnce(ctx, client, s, apiKey)
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(getInterval())
 	defer ticker.Stop()
 	for {
 		select {
@@ -214,7 +254,9 @@ func poll(ctx context.Context, s *store, apiKey string) {
 			pollOnce(ctx, client, s, apiKey)
 		case <-pollTrigger:
 			pollOnce(ctx, client, s, apiKey)
-			ticker.Reset(30 * time.Second)
+			ticker.Reset(getInterval())
+		case <-intervalChanged:
+			ticker.Reset(getInterval())
 		}
 	}
 }
@@ -291,6 +333,35 @@ func main() {
 				}
 				flusher.Flush()
 			}
+		}
+	})
+
+	mux.HandleFunc("/api/poll-interval", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		switch r.Method {
+		case http.MethodGet:
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"seconds": getIntervalSecs(),
+				"allowed": allowedIntervals,
+			})
+		case http.MethodPost:
+			var req struct {
+				Seconds int `json:"seconds"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, "invalid body", http.StatusBadRequest)
+				return
+			}
+			if !isIntervalAllowed(req.Seconds) {
+				http.Error(w, "interval must be one of 5, 15, 30, 60", http.StatusBadRequest)
+				return
+			}
+			setIntervalSecs(req.Seconds)
+			log.Printf("poll interval set to %ds", req.Seconds)
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
 	})
 

@@ -22,10 +22,8 @@
     v: Vehicle;
   };
 
-  // How long to animate each new server position over, in ms.
-  // Server polls every 30s; this is the upper bound on how long a single
-  // lerp segment can run before we get a new "to" point.
-  const LERP_MS = 30_000;
+  // Lerp duration tracks the server's poll interval so each animation
+  // segment runs out roughly when the next snapshot arrives.
 
   // Center per agency (rough — bay-area-wide for RG).
   const agencyCenters: Record<string, [number, number]> = {
@@ -51,8 +49,15 @@
   let agencies = $state<Agency[]>([]);
   let agencyCode = $state<string>('SF');
   let switching = $state(false);
+  let pollIntervalSecs = $state<number>(30);
+  let allowedIntervals = $state<number[]>([5, 15, 30, 60]);
+  let intervalUpdating = $state(false);
   let es: EventSource | undefined;
   let rafId: number | undefined;
+
+  const lerpMs = $derived(pollIntervalSecs * 1000);
+  const requestsPerHour = $derived(Math.round(3600 / pollIntervalSecs));
+  const RATE_LIMIT_PER_HOUR = 60;
 
   const routeCounts = $derived.by(() => {
     const counts = new Map<string, { count: number; mode: string }>();
@@ -135,7 +140,7 @@
         t.fromTime = now;
         t.toLat = v.lat;
         t.toLon = v.lon;
-        t.toTime = now + LERP_MS;
+        t.toTime = now + lerpMs;
         t.v = v;
         ensureMarker(v, t.fromLat, t.fromLon);
       } else {
@@ -162,6 +167,30 @@
       markers.get(id)?.setLatLng([lat, lon]);
     }
     rafId = requestAnimationFrame(tick);
+  }
+
+  async function setPollInterval(secs: number) {
+    if (secs === pollIntervalSecs || intervalUpdating) return;
+    if (!allowedIntervals.includes(secs)) return;
+    intervalUpdating = true;
+    const prev = pollIntervalSecs;
+    pollIntervalSecs = secs;
+    try {
+      const r = await fetch('/api/poll-interval', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ seconds: secs })
+      });
+      if (!r.ok) {
+        pollIntervalSecs = prev;
+        console.error('poll-interval rejected', await r.text());
+      }
+    } catch (e) {
+      pollIntervalSecs = prev;
+      console.error('poll-interval failed', e);
+    } finally {
+      intervalUpdating = false;
+    }
   }
 
   async function switchAgency(code: string) {
@@ -223,6 +252,15 @@
     } catch {}
 
     try {
+      const r = await fetch('/api/poll-interval');
+      if (r.ok) {
+        const data = await r.json();
+        if (typeof data.seconds === 'number') pollIntervalSecs = data.seconds;
+        if (Array.isArray(data.allowed)) allowedIntervals = data.allowed;
+      }
+    } catch {}
+
+    try {
       const r = await fetch('/api/vehicles');
       if (r.ok) applyUpdate(await r.json());
     } catch (e) {
@@ -269,6 +307,33 @@
         <option value={a.code}>{a.name}</option>
       {/each}
     </select>
+
+    <label class="mt-4 block text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+      Refresh rate
+    </label>
+    <div class="mt-1 grid grid-cols-4 gap-1">
+      {#each allowedIntervals as secs}
+        <button
+          type="button"
+          disabled={intervalUpdating}
+          onclick={() => setPollInterval(secs)}
+          class="rounded-md border px-1.5 py-1 text-xs font-medium transition
+            {secs === pollIntervalSecs
+              ? 'border-emerald-500 bg-emerald-500/15 text-emerald-300'
+              : 'border-slate-700 bg-slate-800 text-slate-300 hover:bg-slate-700'}"
+        >
+          {secs}s
+        </button>
+      {/each}
+    </div>
+    <div class="mt-1 text-[10px] {requestsPerHour > RATE_LIMIT_PER_HOUR ? 'text-amber-400' : 'text-slate-500'}">
+      {requestsPerHour} req/hr
+      {#if requestsPerHour > RATE_LIMIT_PER_HOUR}
+        · {Math.round(requestsPerHour / RATE_LIMIT_PER_HOUR)}× over 511's documented limit
+      {:else}
+        · within 511's documented 60 req/hr limit
+      {/if}
+    </div>
 
     <div class="mt-4 flex items-center gap-2 text-xs">
       <span class="inline-flex h-2 w-2 rounded-full {connected ? 'bg-emerald-400' : 'bg-rose-500'}"></span>
