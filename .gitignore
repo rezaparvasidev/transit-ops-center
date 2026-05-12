@@ -28,6 +28,9 @@ go.work.sum
 .env
 .env.local
 
+# Local agent state
+.claude/
+
 # Node / SvelteKit
 node_modules/
 web/.svelte-kit/
