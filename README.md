@@ -1,5 +1,7 @@
 # Transit Ops Center
 
+[![Build and deploy](https://github.com/rezaparvasidev/transit-ops-center/actions/workflows/deploy.yml/badge.svg)](https://github.com/rezaparvasidev/transit-ops-center/actions/workflows/deploy.yml)
+
 Live operations dashboard for Bay Area public transit — real-time vehicle positions from BART, SF Muni, Caltrain, and AC Transit rendered on an interactive map.
 
 **Live demo:** https://transit-ops.victoriousbush-871e8768.eastus.azurecontainerapps.io
@@ -71,6 +73,36 @@ az containerapp create `
   --env-vars "TRANSIT_API_KEY=secretref:transit-api-key" "TRANSIT_AGENCY=SF" `
   --min-replicas 1 --max-replicas 1 --cpu 0.5 --memory 1.0Gi
 ```
+
+## CI/CD
+
+Every push to `main` triggers `.github/workflows/deploy.yml`, which:
+
+1. Logs into Azure via **OIDC federated identity** — no long-lived secrets stored in GitHub.
+2. Authenticates to ACR with the federated token.
+3. Builds the multi-stage image and tags it with the commit SHA.
+4. Pushes the image to ACR.
+5. Updates the Container App with `az containerapp update --image`.
+6. Polls `/healthz` for up to 60s to verify the new revision serves traffic.
+
+```
+push to main ─▶ GitHub Actions runner ─OIDC─▶ Azure App Registration
+                                              │
+                                              ▼ AcrPush role on rezaportfolioacr
+                              docker build ─▶ docker push ─▶ ACR
+                                              │
+                                              ▼ Contributor role on transit-ops Container App
+                                            az containerapp update --image
+                                              │
+                                              ▼ curl /healthz x12 with 5s backoff
+                                            verify or fail
+```
+
+Roles granted to the SP follow least-privilege:
+- `AcrPush` scoped to `rezaportfolioacr` only
+- `Contributor` scoped to the `transit-ops` Container App only (not the whole RG)
+
+No subscription-wide permissions, no resource-group-wide permissions, no client secrets.
 
 ## v1 roadmap
 
