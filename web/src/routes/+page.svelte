@@ -12,25 +12,66 @@
     bearing?: number;
     speed?: number;
     ts: number;
+    mode?: string;
+  };
+  type Agency = { code: string; name: string };
+  type Track = {
+    fromLat: number; fromLon: number;
+    toLat: number;   toLon: number;
+    fromTime: number; toTime: number;
+    v: Vehicle;
+  };
+
+  // How long to animate each new server position over, in ms.
+  // Server polls every 30s; this is the upper bound on how long a single
+  // lerp segment can run before we get a new "to" point.
+  const LERP_MS = 30_000;
+
+  // Center per agency (rough — bay-area-wide for RG).
+  const agencyCenters: Record<string, [number, number]> = {
+    SF: [37.7749, -122.4194],
+    BA: [37.7793, -122.275],
+    CT: [37.55, -122.25],
+    AC: [37.8, -122.27],
+    SC: [37.35, -121.95],
+    GG: [37.95, -122.5],
+    SM: [37.55, -122.3],
+    RG: [37.78, -122.3]
   };
 
   let mapEl = $state<HTMLDivElement | undefined>();
   let map: L.Map | undefined;
   const markers = new Map<string, L.CircleMarker>();
-  let vehicles = $state<Vehicle[]>([]);
+  const tracks  = new Map<string, Track>();
+
+  let vehicles  = $state<Vehicle[]>([]);
   let connected = $state(false);
   let lastUpdate = $state<number | null>(null);
-  let mapStatus = $state<string>('initializing...');
   let mapError = $state<string | null>(null);
+  let agencies = $state<Agency[]>([]);
+  let agencyCode = $state<string>('SF');
+  let switching = $state(false);
   let es: EventSource | undefined;
+  let rafId: number | undefined;
 
   const routeCounts = $derived.by(() => {
-    const counts: Record<string, number> = {};
+    const counts = new Map<string, { count: number; mode: string }>();
     for (const v of vehicles) {
       const r = v.route || 'unknown';
-      counts[r] = (counts[r] ?? 0) + 1;
+      const e = counts.get(r);
+      if (e) e.count += 1;
+      else counts.set(r, { count: 1, mode: v.mode || 'Unknown' });
     }
-    return Object.entries(counts).sort((a, b) => b[1] - a[1]);
+    return [...counts.entries()].sort((a, b) => b[1].count - a[1].count);
+  });
+
+  const modeCounts = $derived.by(() => {
+    const counts = new Map<string, number>();
+    for (const v of vehicles) {
+      const m = v.mode || 'Unknown';
+      counts.set(m, (counts.get(m) ?? 0) + 1);
+    }
+    return [...counts.entries()].sort((a, b) => b[1] - a[1]);
   });
 
   function colorForRoute(route: string | undefined): string {
@@ -40,38 +81,110 @@
     return `hsl(${h % 360}, 75%, 55%)`;
   }
 
-  function upsertMarker(v: Vehicle) {
+  function tooltipHtml(v: Vehicle): string {
+    const route = v.route ?? 'unknown';
+    const mode = v.mode ?? '';
+    return `<div style="line-height:1.35">
+      <strong>${route}</strong>
+      <span style="color:#94a3b8;margin-left:6px">${mode}</span>
+      <div style="color:#94a3b8;font-size:11px">id ${v.id}</div>
+    </div>`;
+  }
+
+  function ensureMarker(v: Vehicle, lat: number, lon: number) {
     if (!map) return;
-    const existing = markers.get(v.id);
-    if (existing) {
-      existing.setLatLng([v.lat, v.lon]);
-      return;
+    let m = markers.get(v.id);
+    if (!m) {
+      m = L.circleMarker([lat, lon], {
+        radius: 5,
+        fillColor: colorForRoute(v.route),
+        color: '#ffffff',
+        weight: 1.5,
+        fillOpacity: 0.95
+      }).bindTooltip(tooltipHtml(v), { direction: 'top' });
+      m.addTo(map);
+      markers.set(v.id, m);
+    } else {
+      m.setTooltipContent(tooltipHtml(v));
     }
-    const m = L.circleMarker([v.lat, v.lon], {
-      radius: 5,
-      fillColor: colorForRoute(v.route),
-      color: '#ffffff',
-      weight: 1.5,
-      fillOpacity: 0.95
-    }).bindTooltip(`${v.route ?? 'unknown'} • ${v.id}`, { direction: 'top' });
-    m.addTo(map);
-    markers.set(v.id, m);
   }
 
   function applyUpdate(next: Vehicle[]) {
     vehicles = next;
     lastUpdate = Date.now();
     if (!map) return;
+    const now = Date.now();
     const seen = new Set<string>();
     for (const v of next) {
       seen.add(v.id);
-      upsertMarker(v);
+      const t = tracks.get(v.id);
+      if (!t) {
+        tracks.set(v.id, {
+          fromLat: v.lat, fromLon: v.lon,
+          toLat: v.lat,   toLon: v.lon,
+          fromTime: now,  toTime: now,
+          v
+        });
+        ensureMarker(v, v.lat, v.lon);
+      } else if (t.toLat !== v.lat || t.toLon !== v.lon) {
+        // Snapshot current interpolated position → becomes new "from".
+        const span = Math.max(1, t.toTime - t.fromTime);
+        const p = Math.min(1, (now - t.fromTime) / span);
+        t.fromLat = t.fromLat + (t.toLat - t.fromLat) * p;
+        t.fromLon = t.fromLon + (t.toLon - t.fromLon) * p;
+        t.fromTime = now;
+        t.toLat = v.lat;
+        t.toLon = v.lon;
+        t.toTime = now + LERP_MS;
+        t.v = v;
+        ensureMarker(v, t.fromLat, t.fromLon);
+      } else {
+        t.v = v;
+        ensureMarker(v, t.fromLat, t.fromLon); // refresh tooltip in case mode/route updated
+      }
     }
-    for (const [id, m] of markers) {
+    for (const id of [...tracks.keys()]) {
       if (!seen.has(id)) {
-        m.remove();
+        tracks.delete(id);
+        markers.get(id)?.remove();
         markers.delete(id);
       }
+    }
+  }
+
+  function tick() {
+    const now = Date.now();
+    for (const [id, t] of tracks) {
+      const span = Math.max(1, t.toTime - t.fromTime);
+      const p = Math.min(1, (now - t.fromTime) / span);
+      const lat = t.fromLat + (t.toLat - t.fromLat) * p;
+      const lon = t.fromLon + (t.toLon - t.fromLon) * p;
+      markers.get(id)?.setLatLng([lat, lon]);
+    }
+    rafId = requestAnimationFrame(tick);
+  }
+
+  async function switchAgency(code: string) {
+    if (code === agencyCode || switching) return;
+    switching = true;
+    agencyCode = code;
+    // Clear client state immediately so we don't lerp old positions into new agency.
+    for (const m of markers.values()) m.remove();
+    markers.clear();
+    tracks.clear();
+    vehicles = [];
+    const c = agencyCenters[code] ?? [37.78, -122.3];
+    map?.setView(c, code === 'RG' ? 10 : 11);
+    try {
+      await fetch('/api/agency', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ agency: code })
+      });
+    } catch (e) {
+      console.error('agency switch failed', e);
+    } finally {
+      switching = false;
     }
   }
 
@@ -80,12 +193,9 @@
       mapError = 'mapEl was undefined at onMount';
       return;
     }
-    const r = mapEl.getBoundingClientRect();
-    mapStatus = `container ${Math.round(r.width)}x${Math.round(r.height)}`;
-
     try {
       map = L.map(mapEl, {
-        center: [37.7749, -122.4194],
+        center: agencyCenters.SF,
         zoom: 12,
         preferCanvas: true,
         zoomControl: true
@@ -96,15 +206,25 @@
         attribution: '© OpenStreetMap contributors'
       }).addTo(map);
       requestAnimationFrame(() => map?.invalidateSize());
-      mapStatus = 'loaded';
     } catch (err) {
       mapError = `init threw: ${err instanceof Error ? err.message : String(err)}`;
       return;
     }
 
     try {
-      const r2 = await fetch('/api/vehicles');
-      if (r2.ok) applyUpdate(await r2.json());
+      const r = await fetch('/api/agency');
+      if (r.ok) {
+        const data = await r.json();
+        agencyCode = data.agency || 'SF';
+        agencies = data.available || [];
+        const c = agencyCenters[agencyCode] ?? [37.78, -122.3];
+        map.setView(c, agencyCode === 'RG' ? 10 : 11);
+      }
+    } catch {}
+
+    try {
+      const r = await fetch('/api/vehicles');
+      if (r.ok) applyUpdate(await r.json());
     } catch (e) {
       console.error('initial load failed', e);
     }
@@ -119,9 +239,12 @@
         console.error('parse error', e);
       }
     };
+
+    rafId = requestAnimationFrame(tick);
   });
 
   onDestroy(() => {
+    if (rafId) cancelAnimationFrame(rafId);
     es?.close();
     map?.remove();
   });
@@ -132,6 +255,21 @@
     <h1 class="text-lg font-semibold tracking-tight">Transit Ops Center</h1>
     <p class="mt-1 text-xs text-slate-400">Live Bay Area vehicle positions · GTFS-RT via 511.org</p>
 
+    <label class="mt-4 block text-[11px] font-semibold uppercase tracking-wide text-slate-400">Agency</label>
+    <select
+      class="mt-1 w-full rounded-md border border-slate-700 bg-slate-800 px-2 py-1.5 text-sm text-slate-100 focus:outline-none focus:ring-1 focus:ring-emerald-500"
+      value={agencyCode}
+      disabled={switching || agencies.length === 0}
+      onchange={(e) => switchAgency((e.currentTarget as HTMLSelectElement).value)}
+    >
+      {#if agencies.length === 0}
+        <option value="SF">SF Muni</option>
+      {/if}
+      {#each agencies as a}
+        <option value={a.code}>{a.name}</option>
+      {/each}
+    </select>
+
     <div class="mt-4 flex items-center gap-2 text-xs">
       <span class="inline-flex h-2 w-2 rounded-full {connected ? 'bg-emerald-400' : 'bg-rose-500'}"></span>
       <span class="text-slate-300">{connected ? 'streaming' : 'disconnected'}</span>
@@ -140,25 +278,39 @@
       {/if}
     </div>
 
-    <div class="mt-3 rounded-md border border-slate-800 bg-slate-950/40 p-2 text-[11px] font-mono leading-relaxed">
-      <div>map: <span class="text-slate-300">{mapStatus}</span></div>
-      {#if mapError}
-        <div class="text-rose-400 break-words">err: {mapError}</div>
-      {/if}
-    </div>
+    {#if mapError}
+      <div class="mt-3 rounded-md border border-rose-900/60 bg-rose-950/40 p-2 text-[11px] font-mono leading-relaxed text-rose-300 break-words">
+        {mapError}
+      </div>
+    {/if}
 
     <div class="mt-4 rounded-md bg-slate-800/60 p-3">
       <div class="text-2xl font-semibold">{vehicles.length}</div>
       <div class="text-xs uppercase tracking-wide text-slate-400">vehicles tracked</div>
     </div>
 
+    {#if modeCounts.length > 0}
+      <h2 class="mt-6 text-xs font-semibold uppercase tracking-wide text-slate-400">Modes</h2>
+      <ul class="mt-2 space-y-1 text-sm">
+        {#each modeCounts as [mode, count]}
+          <li class="flex items-center gap-2 text-slate-200">
+            <span class="text-slate-300">{mode}</span>
+            <span class="ml-auto text-slate-500">{count}</span>
+          </li>
+        {/each}
+      </ul>
+    {/if}
+
     <h2 class="mt-6 text-xs font-semibold uppercase tracking-wide text-slate-400">Routes</h2>
     <ul class="mt-2 space-y-1 text-sm">
-      {#each routeCounts as [route, count]}
-        <li class="flex items-center gap-2">
+      {#each routeCounts as [route, info]}
+        <li
+          class="flex items-center gap-2 cursor-help"
+          title={`${info.mode} · ${info.count} vehicle${info.count === 1 ? '' : 's'}`}
+        >
           <span class="h-3 w-3 rounded-full" style="background: {colorForRoute(route)}"></span>
           <span class="text-slate-200">{route}</span>
-          <span class="ml-auto text-slate-500">{count}</span>
+          <span class="ml-auto text-slate-500">{info.count}</span>
         </li>
       {/each}
     </ul>
@@ -170,7 +322,6 @@
 </div>
 
 <style>
-  /* Leaflet's default attribution control uses light colors that don't fit dark theme */
   :global(.leaflet-control-attribution) {
     background: rgba(15, 23, 42, 0.85) !important;
     color: #94a3b8 !important;
@@ -182,7 +333,8 @@
     background: rgba(15, 23, 42, 0.95);
     border: 1px solid #334155;
     color: #e2e8f0;
-    box-shadow: none;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.45);
+    padding: 6px 10px;
   }
   :global(.leaflet-tooltip-top:before) {
     border-top-color: #334155;
