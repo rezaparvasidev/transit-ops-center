@@ -140,6 +140,36 @@ var (
 
 var allowedIntervals = []int{5, 15, 30, 60}
 
+// Rate-limit state — set when the upstream (511) returns 429, cleared on a
+// successful 200. Each event has a monotonic timestamp so clients can detect
+// a *new* rate-limit event vs. an ongoing one they've already acknowledged.
+type RateLimitInfo struct {
+	At      int64  `json:"at"`      // unix ms when first observed
+	Message string `json:"message"` // human-readable detail
+}
+
+var (
+	rateLimitMu   sync.RWMutex
+	rateLimitInfo *RateLimitInfo
+)
+
+func getRateLimit() *RateLimitInfo {
+	rateLimitMu.RLock()
+	defer rateLimitMu.RUnlock()
+	return rateLimitInfo
+}
+
+func setRateLimit(r *RateLimitInfo) {
+	rateLimitMu.Lock()
+	rateLimitInfo = r
+	rateLimitMu.Unlock()
+}
+
+type snapshotResponse struct {
+	Vehicles    []Vehicle      `json:"vehicles"`
+	RateLimited *RateLimitInfo `json:"rateLimited"`
+}
+
 func isIntervalAllowed(s int) bool {
 	for _, v := range allowedIntervals {
 		if v == s {
@@ -202,6 +232,17 @@ func pollOnce(ctx context.Context, client *http.Client, s *store, apiKey string)
 		return
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusTooManyRequests {
+		secs := getIntervalSecs()
+		setRateLimit(&RateLimitInfo{
+			At: time.Now().UnixMilli(),
+			Message: fmt.Sprintf(
+				"511 returned 429 Too Many Requests. At %ds polling that's ~%d requests/hour against 511's documented 60/hour limit. Switching to 60s will keep us within the limit.",
+				secs, 3600/max(1, secs)),
+		})
+		log.Printf("poll: %s status 429 (rate limited)", agency)
+		return
+	}
 	if resp.StatusCode != http.StatusOK {
 		log.Printf("poll: %s status %d", agency, resp.StatusCode)
 		return
@@ -238,6 +279,8 @@ func pollOnce(ctx context.Context, client *http.Client, s *store, apiKey string)
 		out = append(out, v)
 	}
 	s.replace(out)
+	// Successful poll → clear any prior rate-limit state.
+	setRateLimit(nil)
 	log.Printf("poll: %s -> %d vehicles", agency, len(out))
 }
 
@@ -304,7 +347,10 @@ func main() {
 	mux.HandleFunc("/api/vehicles", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-store")
-		_ = json.NewEncoder(w).Encode(s.snapshot())
+		_ = json.NewEncoder(w).Encode(snapshotResponse{
+			Vehicles:    s.snapshot(),
+			RateLimited: getRateLimit(),
+		})
 	})
 
 	mux.HandleFunc("/api/stream", func(w http.ResponseWriter, r *http.Request) {
@@ -317,7 +363,13 @@ func main() {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Connection", "keep-alive")
 		w.Header().Set("X-Accel-Buffering", "no")
-		if err := writeSSE(w, s.snapshot()); err != nil {
+		send := func() error {
+			return writeSSE(w, snapshotResponse{
+				Vehicles:    s.snapshot(),
+				RateLimited: getRateLimit(),
+			})
+		}
+		if err := send(); err != nil {
 			return
 		}
 		flusher.Flush()
@@ -328,12 +380,30 @@ func main() {
 			case <-r.Context().Done():
 				return
 			case <-ticker.C:
-				if err := writeSSE(w, s.snapshot()); err != nil {
+				if err := send(); err != nil {
 					return
 				}
 				flusher.Flush()
 			}
 		}
+	})
+
+	// Debug-only: forcibly set the rate-limit state so we can demo the
+	// modal/auto-fallback flow without waiting for 511 to actually throttle.
+	mux.HandleFunc("/api/_debug/sim-rate-limit", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		secs := getIntervalSecs()
+		setRateLimit(&RateLimitInfo{
+			At: time.Now().UnixMilli(),
+			Message: fmt.Sprintf(
+				"Simulated rate limit (poll interval %ds, ~%d req/hr).",
+				secs, 3600/max(1, secs)),
+		})
+		log.Printf("rate-limit simulated")
+		w.WriteHeader(http.StatusNoContent)
 	})
 
 	mux.HandleFunc("/api/poll-interval", func(w http.ResponseWriter, r *http.Request) {

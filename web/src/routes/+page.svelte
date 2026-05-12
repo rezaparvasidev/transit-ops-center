@@ -52,6 +52,12 @@
   let pollIntervalSecs = $state<number>(30);
   let allowedIntervals = $state<number[]>([5, 15, 30, 60]);
   let intervalUpdating = $state(false);
+
+  type RateLimitInfo = { at: number; message: string };
+  let rateLimit = $state<RateLimitInfo | null>(null);
+  let lastSeenRateLimitAt = $state<number>(0);
+  let showRateLimitModal = $state(false);
+
   let es: EventSource | undefined;
   let rafId: number | undefined;
 
@@ -114,6 +120,15 @@
     }
   }
 
+  function applySnapshot(payload: { vehicles: Vehicle[]; rateLimited: RateLimitInfo | null }) {
+    rateLimit = payload.rateLimited;
+    if (payload.rateLimited && payload.rateLimited.at > lastSeenRateLimitAt) {
+      lastSeenRateLimitAt = payload.rateLimited.at;
+      showRateLimitModal = true;
+    }
+    applyUpdate(payload.vehicles ?? []);
+  }
+
   function applyUpdate(next: Vehicle[]) {
     vehicles = next;
     lastUpdate = Date.now();
@@ -167,6 +182,11 @@
       markers.get(id)?.setLatLng([lat, lon]);
     }
     rafId = requestAnimationFrame(tick);
+  }
+
+  async function dismissRateLimitModalAndFallTo60s() {
+    showRateLimitModal = false;
+    await setPollInterval(60);
   }
 
   async function setPollInterval(secs: number) {
@@ -262,7 +282,7 @@
 
     try {
       const r = await fetch('/api/vehicles');
-      if (r.ok) applyUpdate(await r.json());
+      if (r.ok) applySnapshot(await r.json());
     } catch (e) {
       console.error('initial load failed', e);
     }
@@ -272,7 +292,7 @@
     es.onerror = () => (connected = false);
     es.onmessage = (ev) => {
       try {
-        applyUpdate(JSON.parse(ev.data));
+        applySnapshot(JSON.parse(ev.data));
       } catch (e) {
         console.error('parse error', e);
       }
@@ -385,6 +405,40 @@
     <div bind:this={mapEl} class="absolute inset-0" style="width: 100%; height: 100%; background: #0f172a;"></div>
   </main>
 </div>
+
+{#if showRateLimitModal && rateLimit}
+  <div
+    class="fixed inset-0 z-[1000] flex items-center justify-center bg-black/70 backdrop-blur-sm"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="rl-title"
+  >
+    <div class="mx-4 w-full max-w-md rounded-lg border border-rose-700 bg-slate-900 p-5 shadow-2xl">
+      <div class="flex items-start gap-3">
+        <div class="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-rose-500/20 text-rose-300">
+          <span class="text-lg font-bold">!</span>
+        </div>
+        <div class="flex-1">
+          <h3 id="rl-title" class="text-base font-semibold text-rose-200">Rate limit hit</h3>
+          <p class="mt-2 text-sm leading-relaxed text-slate-300">{rateLimit.message}</p>
+          <p class="mt-3 text-xs text-slate-400">
+            Clicking OK will switch the poll interval to <strong class="text-slate-200">60 seconds</strong>
+            (60 req/hr — compliant with 511's documented limit).
+          </p>
+        </div>
+      </div>
+      <div class="mt-5 flex justify-end">
+        <button
+          type="button"
+          onclick={dismissRateLimitModalAndFallTo60s}
+          class="rounded-md bg-rose-600 px-4 py-2 text-sm font-medium text-white hover:bg-rose-500 focus:outline-none focus:ring-2 focus:ring-rose-400"
+        >
+          OK
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
 
 <style>
   :global(.leaflet-control-attribution) {
