@@ -14,12 +14,14 @@
     ts: number;
   };
 
-  let mapEl: HTMLDivElement;
+  let mapEl = $state<HTMLDivElement | undefined>();
   let map: MlMap | undefined;
   let markers = new Map<string, Marker>();
-  let vehicles: Vehicle[] = $state([]);
+  let vehicles = $state<Vehicle[]>([]);
   let connected = $state(false);
   let lastUpdate = $state<number | null>(null);
+  let mapStatus = $state<string>('initializing...');
+  let mapError = $state<string | null>(null);
   let es: EventSource | undefined;
 
   const routeCounts = $derived.by(() => {
@@ -39,6 +41,7 @@
   }
 
   function renderMarker(v: Vehicle) {
+    if (!map) return;
     const existing = markers.get(v.id);
     if (existing) {
       existing.setLngLat([v.lon, v.lat]);
@@ -55,7 +58,7 @@
     el.title = `${v.route ?? 'unknown'} • ${v.id}`;
     const m = new maplibregl.Marker({ element: el })
       .setLngLat([v.lon, v.lat])
-      .addTo(map!);
+      .addTo(map);
     if (v.bearing != null) m.setRotation(v.bearing);
     markers.set(v.id, m);
   }
@@ -63,6 +66,7 @@
   function applyUpdate(next: Vehicle[]) {
     vehicles = next;
     lastUpdate = Date.now();
+    if (!map) return;
     const seen = new Set<string>();
     for (const v of next) {
       seen.add(v.id);
@@ -77,32 +81,55 @@
   }
 
   onMount(async () => {
-    map = new maplibregl.Map({
-      container: mapEl,
-      style: {
-        version: 8,
-        sources: {
-          'carto-dark': {
-            type: 'raster',
-            tiles: [
-              'https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png',
-              'https://b.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png',
-              'https://c.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png',
-              'https://d.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png'
-            ],
-            tileSize: 256,
-            attribution: '© OpenStreetMap contributors © CARTO'
-          }
-        },
-        layers: [{ id: 'carto-dark-layer', type: 'raster', source: 'carto-dark' }]
-      },
-      center: [-122.4194, 37.7749],
-      zoom: 11
-    });
+    if (!mapEl) {
+      mapError = 'mapEl was undefined at onMount';
+      return;
+    }
+    const r = mapEl.getBoundingClientRect();
+    mapStatus = `container ${Math.round(r.width)}x${Math.round(r.height)}`;
+    if (r.width === 0 || r.height === 0) {
+      mapError = `container has zero size (${r.width}x${r.height})`;
+    }
 
     try {
-      const r = await fetch('/api/vehicles');
-      if (r.ok) applyUpdate(await r.json());
+      map = new maplibregl.Map({
+        container: mapEl,
+        style: {
+          version: 8,
+          sources: {
+            osm: {
+              type: 'raster',
+              tiles: [
+                'https://a.tile.openstreetmap.org/{z}/{x}/{y}.png',
+                'https://b.tile.openstreetmap.org/{z}/{x}/{y}.png',
+                'https://c.tile.openstreetmap.org/{z}/{x}/{y}.png'
+              ],
+              tileSize: 256,
+              attribution: '© OpenStreetMap contributors'
+            }
+          },
+          layers: [{ id: 'osm', type: 'raster', source: 'osm' }]
+        },
+        center: [-122.4194, 37.7749],
+        zoom: 11
+      });
+
+      map.on('load', () => {
+        mapStatus = 'loaded';
+        // Force a resize in case container dimensions changed during init.
+        requestAnimationFrame(() => map?.resize());
+      });
+      map.on('error', (e) => {
+        mapError = `maplibre error: ${e.error?.message ?? String(e)}`;
+      });
+    } catch (err) {
+      mapError = `init threw: ${err instanceof Error ? err.message : String(err)}`;
+      return;
+    }
+
+    try {
+      const r2 = await fetch('/api/vehicles');
+      if (r2.ok) applyUpdate(await r2.json());
     } catch (e) {
       console.error('initial load failed', e);
     }
@@ -138,7 +165,14 @@
       {/if}
     </div>
 
-    <div class="mt-6 rounded-md bg-slate-800/60 p-3">
+    <div class="mt-3 rounded-md border border-slate-800 bg-slate-950/40 p-2 text-[11px] font-mono leading-relaxed">
+      <div>map: <span class="text-slate-300">{mapStatus}</span></div>
+      {#if mapError}
+        <div class="text-rose-400">err: {mapError}</div>
+      {/if}
+    </div>
+
+    <div class="mt-4 rounded-md bg-slate-800/60 p-3">
       <div class="text-2xl font-semibold">{vehicles.length}</div>
       <div class="text-xs uppercase tracking-wide text-slate-400">vehicles tracked</div>
     </div>
@@ -156,6 +190,6 @@
   </aside>
 
   <main class="relative flex-1">
-    <div bind:this={mapEl} class="absolute inset-0"></div>
+    <div bind:this={mapEl} class="absolute inset-0" style="width: 100%; height: 100%;"></div>
   </main>
 </div>
