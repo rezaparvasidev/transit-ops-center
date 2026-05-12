@@ -1,0 +1,67 @@
+name: Build and deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  IMAGE_NAME: transit-ops
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure login (OIDC federated identity)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: ACR login
+        run: az acr login --name ${{ vars.ACR_NAME }}
+
+      - name: Build image
+        id: build
+        run: |
+          IMAGE_TAG=${{ vars.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          docker build -t "$IMAGE_TAG" .
+          echo "image_tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Push image
+        run: docker push "${{ steps.build.outputs.image_tag }}"
+
+      - name: Update Container App
+        run: |
+          az containerapp update \
+            --name ${{ vars.CONTAINER_APP_NAME }} \
+            --resource-group ${{ vars.RESOURCE_GROUP }} \
+            --image "${{ steps.build.outputs.image_tag }}"
+
+      - name: Verify deployment
+        run: |
+          FQDN=$(az containerapp show \
+            --name ${{ vars.CONTAINER_APP_NAME }} \
+            --resource-group ${{ vars.RESOURCE_GROUP }} \
+            --query properties.configuration.ingress.fqdn -o tsv)
+          echo "App URL: https://$FQDN"
+          for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "https://$FQDN/healthz" || echo "000")
+            echo "attempt $i: HTTP $STATUS"
+            if [ "$STATUS" = "200" ]; then
+              echo "Deployment verified at https://$FQDN"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "healthz did not return 200 within 60s"
+          exit 1
