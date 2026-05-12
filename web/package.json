@@ -12,6 +12,7 @@
     "@sveltejs/adapter-static": "^3.0.6",
     "@sveltejs/kit": "^2.8.0",
     "@sveltejs/vite-plugin-svelte": "^4.0.0",
+    "@types/leaflet": "^1.9.12",
     "autoprefixer": "^10.4.20",
     "postcss": "^8.4.49",
     "svelte": "^5.1.0",
@@ -20,6 +21,6 @@
     "vite": "^5.4.10"
   },
   "dependencies": {
-    "maplibre-gl": "^4.7.1"
+    "leaflet": "^1.9.4"
   }
 }

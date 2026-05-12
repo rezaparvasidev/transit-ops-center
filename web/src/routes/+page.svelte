@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import maplibregl, { type Map as MlMap, type Marker } from 'maplibre-gl';
-  import 'maplibre-gl/dist/maplibre-gl.css';
+  import L from 'leaflet';
+  import 'leaflet/dist/leaflet.css';
 
   type Vehicle = {
     id: string;
@@ -15,8 +15,8 @@
   };
 
   let mapEl = $state<HTMLDivElement | undefined>();
-  let map: MlMap | undefined;
-  let markers = new Map<string, Marker>();
+  let map: L.Map | undefined;
+  const markers = new Map<string, L.CircleMarker>();
   let vehicles = $state<Vehicle[]>([]);
   let connected = $state(false);
   let lastUpdate = $state<number | null>(null);
@@ -40,26 +40,21 @@
     return `hsl(${h % 360}, 75%, 55%)`;
   }
 
-  function renderMarker(v: Vehicle) {
+  function upsertMarker(v: Vehicle) {
     if (!map) return;
     const existing = markers.get(v.id);
     if (existing) {
-      existing.setLngLat([v.lon, v.lat]);
-      if (v.bearing != null) existing.setRotation(v.bearing);
+      existing.setLatLng([v.lat, v.lon]);
       return;
     }
-    const el = document.createElement('div');
-    el.style.cssText = `
-      width: 14px; height: 14px; border-radius: 50%;
-      background: ${colorForRoute(v.route)};
-      border: 2px solid white; box-shadow: 0 0 4px rgba(0,0,0,0.6);
-      cursor: pointer;
-    `;
-    el.title = `${v.route ?? 'unknown'} • ${v.id}`;
-    const m = new maplibregl.Marker({ element: el })
-      .setLngLat([v.lon, v.lat])
-      .addTo(map);
-    if (v.bearing != null) m.setRotation(v.bearing);
+    const m = L.circleMarker([v.lat, v.lon], {
+      radius: 5,
+      fillColor: colorForRoute(v.route),
+      color: '#ffffff',
+      weight: 1.5,
+      fillOpacity: 0.95
+    }).bindTooltip(`${v.route ?? 'unknown'} • ${v.id}`, { direction: 'top' });
+    m.addTo(map);
     markers.set(v.id, m);
   }
 
@@ -70,7 +65,7 @@
     const seen = new Set<string>();
     for (const v of next) {
       seen.add(v.id);
-      renderMarker(v);
+      upsertMarker(v);
     }
     for (const [id, m] of markers) {
       if (!seen.has(id)) {
@@ -87,41 +82,21 @@
     }
     const r = mapEl.getBoundingClientRect();
     mapStatus = `container ${Math.round(r.width)}x${Math.round(r.height)}`;
-    if (r.width === 0 || r.height === 0) {
-      mapError = `container has zero size (${r.width}x${r.height})`;
-    }
 
     try {
-      map = new maplibregl.Map({
-        container: mapEl,
-        style: {
-          version: 8,
-          sources: {
-            osm: {
-              type: 'raster',
-              tiles: [
-                'https://a.tile.openstreetmap.org/{z}/{x}/{y}.png',
-                'https://b.tile.openstreetmap.org/{z}/{x}/{y}.png',
-                'https://c.tile.openstreetmap.org/{z}/{x}/{y}.png'
-              ],
-              tileSize: 256,
-              attribution: '© OpenStreetMap contributors'
-            }
-          },
-          layers: [{ id: 'osm', type: 'raster', source: 'osm' }]
-        },
-        center: [-122.4194, 37.7749],
-        zoom: 11
+      map = L.map(mapEl, {
+        center: [37.7749, -122.4194],
+        zoom: 12,
+        preferCanvas: true,
+        zoomControl: true
       });
-
-      map.on('load', () => {
-        mapStatus = 'loaded';
-        // Force a resize in case container dimensions changed during init.
-        requestAnimationFrame(() => map?.resize());
-      });
-      map.on('error', (e) => {
-        mapError = `maplibre error: ${e.error?.message ?? String(e)}`;
-      });
+      L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png', {
+        subdomains: 'abcd',
+        maxZoom: 19,
+        attribution: '© OpenStreetMap contributors © CARTO'
+      }).addTo(map);
+      requestAnimationFrame(() => map?.invalidateSize());
+      mapStatus = 'loaded';
     } catch (err) {
       mapError = `init threw: ${err instanceof Error ? err.message : String(err)}`;
       return;
@@ -168,7 +143,7 @@
     <div class="mt-3 rounded-md border border-slate-800 bg-slate-950/40 p-2 text-[11px] font-mono leading-relaxed">
       <div>map: <span class="text-slate-300">{mapStatus}</span></div>
       {#if mapError}
-        <div class="text-rose-400">err: {mapError}</div>
+        <div class="text-rose-400 break-words">err: {mapError}</div>
       {/if}
     </div>
 
@@ -190,6 +165,26 @@
   </aside>
 
   <main class="relative flex-1">
-    <div bind:this={mapEl} class="absolute inset-0" style="width: 100%; height: 100%;"></div>
+    <div bind:this={mapEl} class="absolute inset-0" style="width: 100%; height: 100%; background: #0f172a;"></div>
   </main>
 </div>
+
+<style>
+  /* Leaflet's default attribution control uses light colors that don't fit dark theme */
+  :global(.leaflet-control-attribution) {
+    background: rgba(15, 23, 42, 0.85) !important;
+    color: #94a3b8 !important;
+  }
+  :global(.leaflet-control-attribution a) {
+    color: #cbd5e1 !important;
+  }
+  :global(.leaflet-tooltip) {
+    background: rgba(15, 23, 42, 0.95);
+    border: 1px solid #334155;
+    color: #e2e8f0;
+    box-shadow: none;
+  }
+  :global(.leaflet-tooltip-top:before) {
+    border-top-color: #334155;
+  }
+</style>
