@@ -4,7 +4,7 @@
 
 Live operations dashboard for Bay Area public transit — real-time vehicle positions from BART, SF Muni, Caltrain, and AC Transit rendered on an interactive map.
 
-**Live demo:** https://transit-ops.victoriousbush-871e8768.eastus.azurecontainerapps.io
+**Live demo:** https://transit-ops.yellowcliff-273efdc6.eastus.azurecontainerapps.io
 
 ## Architecture (v0)
 

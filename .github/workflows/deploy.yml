@@ -11,7 +11,7 @@ permissions:
   packages: write   # required to push to ghcr.io
 
 env:
-  RESOURCE_GROUP: rg-rezaparvasi
+  RESOURCE_GROUP: rg-transit-ops-prod
   CONTAINER_APP_NAME: transit-ops
   IMAGE: ghcr.io/rezaparvasidev/transit-ops
 
